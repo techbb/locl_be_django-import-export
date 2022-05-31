@@ -31,7 +31,6 @@ class ImportExportMixinBase:
 class ImportMixin(BaseImportMixin, ImportExportMixinBase):
     """
     Import mixin.
-
     This is intended to be mixed with django.contrib.admin.ModelAdmin
     https://docs.djangoproject.com/en/dev/ref/contrib/admin/
     """
@@ -119,7 +118,7 @@ class ImportMixin(BaseImportMixin, ImportExportMixinBase):
     def process_dataset(self, dataset, confirm_form, request, *args, **kwargs):
 
         res_kwargs = self.get_import_resource_kwargs(request, form=confirm_form, *args, **kwargs)
-        resource = self.get_import_resource_class()(**res_kwargs)
+        resource = self.choose_import_resource_class(confirm_form)(**res_kwargs)
 
         imp_kwargs = self.get_import_data_kwargs(request, form=confirm_form, *args, **kwargs)
         return resource.import_data(dataset,
@@ -189,10 +188,8 @@ class ImportMixin(BaseImportMixin, ImportExportMixinBase):
     def get_form_kwargs(self, form, *args, **kwargs):
         """
         Prepare/returns kwargs for the import form.
-
         To distinguish between import and confirm import forms,
         the following approach may be used:
-
             if isinstance(form, ImportForm):
                 # your code here for the import form kwargs
                 # e.g. update.kwargs({...})
@@ -238,6 +235,7 @@ class ImportMixin(BaseImportMixin, ImportExportMixinBase):
         form_type = self.get_import_form()
         form_kwargs = self.get_form_kwargs(form_type, *args, **kwargs)
         form = form_type(import_formats,
+                         self.get_import_resource_classes(),
                          request.POST or None,
                          request.FILES or None,
                          **form_kwargs)
@@ -265,7 +263,8 @@ class ImportMixin(BaseImportMixin, ImportExportMixinBase):
 
             # prepare kwargs for import data, if needed
             res_kwargs = self.get_import_resource_kwargs(request, form=form, *args, **kwargs)
-            resource = self.get_import_resource_class()(**res_kwargs)
+            resource = self.choose_import_resource_class(form)(**res_kwargs)
+            resources = [resource]
 
             # prepare additional kwargs for import_data, if needed
             imp_kwargs = self.get_import_data_kwargs(request, form=form, *args, **kwargs)
@@ -282,20 +281,25 @@ class ImportMixin(BaseImportMixin, ImportExportMixinBase):
                     'import_file_name': tmp_storage.name,
                     'original_file_name': import_file.name,
                     'input_format': form.cleaned_data['input_format'],
+                    'resource': request.POST.get('resource', ''),
                 }
                 confirm_form = self.get_confirm_import_form()
                 initial = self.get_form_kwargs(form=form, **initial)
                 context['confirm_form'] = confirm_form(initial=initial)
         else:
             res_kwargs = self.get_import_resource_kwargs(request, form=form, *args, **kwargs)
-            resource = self.get_import_resource_class()(**res_kwargs)
+            resource_classes = self.get_import_resource_classes()
+            resources = [resource_class(**res_kwargs) for resource_class in resource_classes]
 
         context.update(self.admin_site.each_context(request))
 
         context['title'] = _("Import")
         context['form'] = form
         context['opts'] = self.model._meta
-        context['fields'] = [f.column_name for f in resource.get_user_visible_fields()]
+        context['fields_list'] = [
+            (resource.get_display_name(), [f.column_name for f in resource.get_user_visible_fields()])
+            for resource in resources
+        ]
 
         request.current_app = self.admin_site.name
         return TemplateResponse(request, [self.import_template_name],
@@ -311,7 +315,6 @@ class ImportMixin(BaseImportMixin, ImportExportMixinBase):
 class ExportMixin(BaseExportMixin, ImportExportMixinBase):
     """
     Export mixin.
-
     This is intended to be mixed with django.contrib.admin.ModelAdmin
     https://docs.djangoproject.com/en/dev/ref/contrib/admin/
     """
@@ -346,7 +349,6 @@ class ExportMixin(BaseExportMixin, ImportExportMixinBase):
     def get_export_queryset(self, request):
         """
         Returns export queryset.
-
         Default implementation respects applied search and filters.
         """
         list_display = self.get_list_display(request)
@@ -405,14 +407,16 @@ class ExportMixin(BaseExportMixin, ImportExportMixinBase):
             raise PermissionDenied
 
         formats = self.get_export_formats()
-        form = ExportForm(formats, request.POST or None)
+        form = ExportForm(formats, self.get_export_resource_classes(), request.POST or None)
         if form.is_valid():
             file_format = formats[
                 int(form.cleaned_data['file_format'])
             ]()
 
             queryset = self.get_export_queryset(request)
-            export_data = self.get_export_data(file_format, queryset, request=request, encoding=self.to_encoding)
+            export_data = self.get_export_data(
+                file_format, queryset, request=request, encoding=self.to_encoding, export_form=form,
+            )
             content_type = file_format.get_content_type()
             response = HttpResponse(export_data, content_type=content_type)
             response['Content-Disposition'] = 'attachment; filename="%s"' % (
